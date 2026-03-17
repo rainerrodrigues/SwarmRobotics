@@ -1,0 +1,7 @@
+[deps]
+AbstractGPs = "99985d1d-32ba-4be9-9821-2ec096f28918"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+KernelFunctions = "ec8451be-7e33-11e9-00cf-bbf324bd1392"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
+WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
