@@ -1,16 +1,10 @@
-# spatial_mapping.jl
-using Pkg
-Pkg.activate(".")
-using AbstractGPs
-using KernelFunctions
-using Random
-using LinearAlgebra
-using MeshCat
-using GeometryBasics
-using Colors
-using CoordinateTransformations # <--- The critical missing dependency for movement
+# src/spatial_mapping.jl
 
-println("1. Simulating initial sparse telemetry...")
+function run_active_mapping()
+    println("1. Simulating initial sparse telemetry...")
+    Random.seed!(42)
+    
+    println("1. Simulating initial sparse telemetry...")
 Random.seed!(42)
 num_rovers = 15
 X_obs = [rand(2) .* 10 for _ in 1:num_rovers] 
@@ -22,7 +16,7 @@ p_fx = posterior(f(X_obs, 0.05), y_obs)
 
 x_range = range(0, 10, length=50)
 y_range = range(0, 10, length=50)
-grid_points = [[x, y] for x in x_range for y in y_range]
+grid_points = [[x, y] for y in y_range for x in x_range]
 
 predictions = marginals(p_fx(grid_points))
 mean_moisture = reshape(mean.(predictions), 50, 50)
@@ -90,9 +84,12 @@ for step in 1:10
     active_rover = 1
     new_coord = [target_x, target_y]
     new_reading = sin(new_coord[1]*0.5) + cos(new_coord[2]*0.5) + 0.1*randn()
+
+    global X_obs = push!(X_obs, new_coord)
+    global y_obs = push!(y_obs, new_reading)
     
-    X_obs[active_rover] = new_coord
-    y_obs[active_rover] = new_reading
+    #X_obs[active_rover] = new_coord
+    #y_obs[active_rover] = new_reading
     
     # C. Update the Gaussian Process
     global p_fx = posterior(f(X_obs, 0.05), y_obs)
@@ -115,3 +112,8 @@ end
 println("\n✅ Active mapping complete.")
 println("Press Enter in this terminal to close the server and exit...")
 readline()
+    
+    println("\n✅ Active mapping complete.")
+    println("Press Enter in this terminal to close the server and exit...")
+    readline()
+end
