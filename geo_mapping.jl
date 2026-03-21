@@ -43,11 +43,20 @@ x_coords = range(0, 20.0, length=new_x)
 y_coords = range(0, 20.0, length=new_y)
 grid_points = [[x_coords[i], y_coords[j]] for j in 1:new_y for i in 1:new_x]
 
-# Hardware State Tracking
+# 🔋 BMS & KINEMATIC STATE TRACKING
 rover_positions = Vector{Vector{Float64}}()
-rover_batteries = fill(100.0, num_rovers) # Start at 100%
-rover_wear = fill(0.0, num_rovers)        # Start at 0 motor wear
-max_speed_per_cycle = 3.0                 # Drones can only fly 3 meters per cycle
+rover_batteries = fill(100.0, num_rovers)
+rover_states = fill("EXPLORING", num_rovers) # States: EXPLORING, RETURNING, CHARGING
+rover_velocities = fill(0.0, num_rovers)
+
+# Physics Limits
+max_speed = 3.0
+acceleration = 1.0 # Gains 1 m/s per cycle
+commercial_airspace_ceiling = 620.0 # Strict No-Fly Zone above 620m absolute altitude
+
+# The Base Station (Charging Pad)
+base_station_coord = [10.0, 10.0]
+base_station_z = clean_terrain[searchsortedfirst(x_coords, 10.0), searchsortedfirst(y_coords, 10.0)]
 
 for _ in 1:num_rovers
     rx = rand(1:new_x); ry = rand(1:new_y)
@@ -104,99 +113,101 @@ println("\n🚀 Initiating Hardware-Aware Swarm Logic...")
 hazard_map = zeros(new_x, new_y)
 flood_spawned = false
 
-for step in 1:20
-    # 🌊 DYNAMIC DISASTER EVENT: Flash Flood at Cycle 10
-    if step == 10 && !flood_spawned
-        println("\n⚠️  CRITICAL WARNING: MONSOON FLASH FLOOD DETECTED IN THE VALLEYS! ⚠️")
-        global flood_spawned = true
-        
-        flood_points = Point3f[]
-        flood_colors = RGBA{Float32}[]
-        
-        # Water pools in the lowest 15 meters of our terrain
-        flood_threshold = min_alt + 15.0 
-        
-        for i in 1:new_x, j in 1:new_y
-            if clean_terrain[i,j] < flood_threshold
-                hazard_map[i, j] = 50.0 # Assign a massive mathematical penalty
-                
-                # Render the water in MeshCat slightly above the ground
-                push!(flood_points, Point3f(x_coords[i], y_coords[j], get_visual_z(clean_terrain[i,j]) + 0.1))
-                push!(flood_colors, RGBA{Float32}(0.0f0, 0.4f0, 0.8f0, 0.7f0)) # Semi-transparent blue
-            end
-        end
-        
-        # Push the floodwater to the 3D browser
-        setobject!(vis["environment"]["floodwater"], PointCloud(flood_points, flood_colors), PointsMaterial(size=0.18))
-        println("   -> Global Cost Map Updated. Rerouting swarm...")
-    end
-    
+println("\n🚀 Initiating BMS and Airspace-Aware Swarm Logic...")
+
+for step in 1:40
     p_fx = posterior(f(X_obs, 0.05), y_obs)
     uncertainty = reshape(var.(marginals(p_fx(grid_points))), new_x, new_y)
     
-    # Cost Function: Uncertainty vs Terrain Steepness
+    # Cost Function: Uncertainty vs Terrain vs Hazards vs AIRSPACE
     utility = zeros(new_x, new_y)
-
-    # Cost Function: Uncertainty vs Terrain Steepness
     Threads.@threads for i in 1:new_x
         for j in 1:new_y
-            utility[i, j] = uncertainty[i, j] - (0.8 * ((clean_terrain[i,j] - min_alt) / (max_alt - min_alt)))
+            actual_alt = clean_terrain[i,j]
+            # Airspace Limitation: If it's too high, apply massive penalty
+            airspace_penalty = actual_alt > commercial_airspace_ceiling ? 9999.0 : 0.0
+            
+            normalized_elevation = (actual_alt - min_alt) / (max_alt - min_alt)
+            utility[i, j] = uncertainty[i, j] - (0.8 * normalized_elevation) - hazard_map[i, j] - airspace_penalty
         end
     end
-    # List comprehension version (slightly slower but more concise):
-    # utility = [uncertainty[i, j] - (0.8 * ((clean_terrain[i,j] - min_alt) / (max_alt - min_alt))) for i in 1:new_x, j in 1:new_y]
+    
     _, max_idx = findmax(utility)
     ideal_target = [x_coords[max_idx[1]], y_coords[max_idx[2]]]
     
-    # Filter for rovers that actually have battery left (> 10%)
-    alive_rovers = findall(b -> b > 10.0, rover_batteries)
-    if isempty(alive_rovers)
-        println("⚠️ ALL ROVERS OUT OF BATTERY. Mission Abort.")
-        break
+    # 🧠 BMS STATE MACHINE FOR ALL ROVERS
+    for active_rover in 1:num_rovers
+        
+        # State: CHARGING
+        if rover_states[active_rover] == "CHARGING"
+            rover_batteries[active_rover] += 20.0 # Charge rapidly
+            if rover_batteries[active_rover] >= 100.0
+                rover_batteries[active_rover] = 100.0
+                rover_states[active_rover] = "EXPLORING"
+                println("   🔋 Rover $active_rover is fully charged. Resuming exploration.")
+            end
+            continue # Skip movement while charging
+        end
+        
+        # State: CHECK BATTERY -> RETURNING
+        if rover_batteries[active_rover] < 25.0 && rover_states[active_rover] != "RETURNING"
+            rover_states[active_rover] = "RETURNING"
+            println("   ⚠️ Rover $active_rover reached Bingo Fuel. Returning to Base.")
+        end
+        
+        # Determine target based on State
+        current_target = rover_states[active_rover] == "RETURNING" ? base_station_coord : ideal_target
+        dist_to_target = norm(rover_positions[active_rover] - current_target)
+        
+        # State: ARRIVED AT BASE
+        if rover_states[active_rover] == "RETURNING" && dist_to_target < 0.5
+            rover_states[active_rover] = "CHARGING"
+            rover_velocities[active_rover] = 0.0
+            continue
+        end
+        
+        # KINEMATICS: Accelerate towards target
+        if dist_to_target > 0.1
+            rover_velocities[active_rover] = min(rover_velocities[active_rover] + acceleration, max_speed)
+        else
+            rover_velocities[active_rover] = 0.0 # Halt to take reading
+        end
+        
+        actual_distance_moved = min(dist_to_target, rover_velocities[active_rover])
+        
+        if actual_distance_moved > 0
+            direction_vector = normalize(current_target - rover_positions[active_rover])
+            new_position = rover_positions[active_rover] + (direction_vector * actual_distance_moved)
+            
+            # Snap to grid
+            new_x_idx = clamp(searchsortedfirst(x_coords, new_position[1]), 1, new_x)
+            new_y_idx = clamp(searchsortedfirst(y_coords, new_position[2]), 1, new_y)
+            actual_z = clean_terrain[new_x_idx, new_y_idx]
+            
+            # Drain Battery
+            terrain_steepness = (actual_z - min_alt) / (max_alt - min_alt)
+            rover_batteries[active_rover] -= actual_distance_moved * (1.5 + (terrain_steepness * 3.0))
+            rover_positions[active_rover] = [x_coords[new_x_idx], y_coords[new_y_idx]]
+            
+            # If Exploring, log the data
+            if rover_states[active_rover] == "EXPLORING" && rover_velocities[active_rover] == 0.0
+                push!(X_obs, rover_positions[active_rover])
+                push!(y_obs, true_moisture[new_x_idx, new_y_idx])
+            end
+            
+            # Render
+            rover_node = vis["rovers"]["rover_$active_rover"]
+
+            visual_z = get_visual_z(actual_z) + 2.0
+            # Add 2.0 to visual Z so the drones hover slightly above the ground
+            settransform!(rover_node, compose(
+    Translation(x_coords[new_x_idx], y_coords[new_y_idx], visual_z), 
+    LinearMap(UniformScaling(0.005)) # Shrinks the Godzilla drone down to rover size!
+))
+        end
     end
     
-    # Find the closest ALIVE rover
-    distances = [norm(rover_positions[r] - ideal_target) for r in alive_rovers]
-    active_rover = alive_rovers[argmin(distances)]
-    dist_to_target = distances[argmin(distances)]
-    
-    # KINEMATICS: Cap the movement speed. It might not reach the target this cycle!
-    actual_distance_moved = min(dist_to_target, max_speed_per_cycle)
-    direction_vector = normalize(ideal_target - rover_positions[active_rover])
-    new_position = rover_positions[active_rover] + (direction_vector * actual_distance_moved)
-    
-    # Snap the new position to our nearest grid index to read the soil/altitude
-    new_x_idx = clamp(searchsortedfirst(x_coords, new_position[1]), 1, new_x)
-    new_y_idx = clamp(searchsortedfirst(y_coords, new_position[2]), 1, new_y)
-    actual_z = clean_terrain[new_x_idx, new_y_idx]
-    
-    # HARDWARE PHYSICS: Calculate Battery Drain and Motor Wear
-    # Steeper terrain exponentially increases battery drain and motor wear (Phase 1 HBM Bridge)
-    terrain_steepness = (actual_z - min_alt) / (max_alt - min_alt)
-    battery_cost = actual_distance_moved * (1.5 + (terrain_steepness * 3.0)) 
-    wear_increase = actual_distance_moved * (0.01 + (terrain_steepness * 0.05)) * rand() # Pseudo-probabilistic wear
-    
-    rover_batteries[active_rover] -= battery_cost
-    rover_wear[active_rover] += wear_increase
-    rover_positions[active_rover] = [x_coords[new_x_idx], y_coords[new_y_idx]]
-    
-    # Log the reading to the Swarm Brain
-    push!(X_obs, rover_positions[active_rover])
-    push!(y_obs, true_moisture[new_x_idx, new_y_idx])
-    
-    # EXPORT TO ROS 2
-    open(csv_path, "a") do io
-        write(io, "$step,rover_$active_rover,$(x_coords[new_x_idx]),$(y_coords[new_y_idx]),$actual_z,$(rover_batteries[active_rover]),$(rover_wear[active_rover])\n")
-    end
-    
-    # VISUALIZE
-    rover_node = vis["rovers"]["rover_$active_rover"]
-    setobject!(rover_node, drone_mesh, drone_material)
-    visual_z = get_visual_z(actual_z)
-    settransform!(rover_node, Translation(x_coords[new_x_idx], y_coords[new_y_idx], visual_z))
-    
-    println("Cycle $step | Rover $active_rover -> Moved $(round(actual_distance_moved, digits=1))m | Batt: $(round(rover_batteries[active_rover], digits=1))% | Wear: $(round(rover_wear[active_rover], digits=3))")
-    sleep(0.8)
+    sleep(0.5)
 end
 
-println("\n✅ Simulation Complete. Waypoints exported to $csv_path.")
+println("\n✅ Multi-Agent Simulation Complete.")
