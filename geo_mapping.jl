@@ -19,6 +19,8 @@ println("✅ ROS 2 Bridge Initialized: Logging to $csv_path")
 # 2. FETCH PHYSICAL TERRAIN (Pune, Maharashtra)
 # ---------------------------------------------------------
 ENV["RASTERDATASOURCES_PATH"] = joinpath(@__DIR__, "data")
+println("1. Loading Real Geo-Data (Pune, Maharashtra)...")
+
 raw_bounds = ((73.7, 74.0), (18.4, 18.7))
 tile_paths = getraster(SRTM; bounds=raw_bounds)
 lon_range = X(73.7 .. 74.0); lat_range = Y(18.4 .. 18.7)
@@ -94,6 +96,10 @@ for i in 1:new_x, j in 1:new_y
 end
 setobject!(vis["environment"]["ghats"], PointCloud(points, colors), PointsMaterial(size=0.15))
 
+# Draw the Base Station
+setobject!(vis["environment"]["base_station"], Cylinder(Point3f(0,0,0), Point3f(0,0,0.2), 0.8f0), MeshLambertMaterial(color=colorant"yellow"))
+settransform!(vis["environment"]["base_station"], Translation(base_station_coord[1], base_station_coord[2], get_visual_z(base_station_z)))
+
 # Attempt to load STL, fallback to a standard geometry if missing
 # Drone Quadcopter STL from https://www.thingiverse.com/thing:1312645/files
 drone_mesh = try
@@ -103,6 +109,11 @@ catch
     Rect3f(Vec3f(-0.3, -0.3, -0.3), Vec3f(0.6, 0.6, 0.6))
 end
 drone_material = MeshLambertMaterial(color=colorant"red")
+
+# Apply the STL to all 5 rovers
+for r in 1:num_rovers
+    setobject!(vis["rovers"]["rover_$r"], drone_mesh, drone_material)
+end
 
 # ---------------------------------------------------------
 # 5. THE ACTIVE LEARNING & KINEMATIC LOOP
@@ -195,15 +206,20 @@ for step in 1:40
                 push!(y_obs, true_moisture[new_x_idx, new_y_idx])
             end
             
-            # Render
-            rover_node = vis["rovers"]["rover_$active_rover"]
-
             visual_z = get_visual_z(actual_z) + 2.0
-            # Add 2.0 to visual Z so the drones hover slightly above the ground
+            # 🧠 RENDER AND SCALE THE STL DRONE
+            rover_node = vis["rovers"]["rover_$active_rover"]
+            visual_z = get_visual_z(actual_z) + 2.0 # Hover 2 meters above ground
+            
+            # Shrink the Godzilla drone down by 0.5%
             settransform!(rover_node, compose(
-    Translation(x_coords[new_x_idx], y_coords[new_y_idx], visual_z), 
-    LinearMap(UniformScaling(0.005)) # Shrinks the Godzilla drone down to rover size!
-))
+                Translation(x_coords[new_x_idx], y_coords[new_y_idx], visual_z), 
+                LinearMap(UniformScaling(0.005)) 
+            ))
+            
+            # 🧠 TELEMETRY DASHBOARD OUTPUT
+            status_icon = rover_states[active_rover] == "EXPLORING" ? "🚁" : "🏠"
+            println("   $status_icon Drone $active_rover | State: $(rover_states[active_rover]) | Spd: $(round(rover_velocities[active_rover], digits=1))m/s | Batt: $(round(rover_batteries[active_rover], digits=1))% | Alt: $(round(actual_z, digits=1))m")
         end
     end
     
